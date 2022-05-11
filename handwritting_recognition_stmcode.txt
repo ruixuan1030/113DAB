@@ -1,0 +1,843 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * <h2><center>&copy; Copyright (c) 2021 STMicroelectronics.
+  * All rights reserved.</center></h2>
+  *
+  * This software component is licensed by ST under BSD 3-Clause license,
+  * the "License"; You may not use this file except in compliance with the
+  * License. You may obtain a copy of the License at:
+  *                        opensource.org/licenses/BSD-3-Clause
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "string.h"
+#include "fatfs.h"
+#include "usb_host.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+#if defined ( __ICCARM__ ) /*!< IAR Compiler */
+
+#pragma location=0x30040000
+ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
+#pragma location=0x30040060
+ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
+#pragma location=0x30040200
+uint8_t Rx_Buff[ETH_RX_DESC_CNT][ETH_MAX_PACKET_SIZE]; /* Ethernet Receive Buffers */
+
+#elif defined ( __CC_ARM )  /* MDK ARM Compiler */
+
+__attribute__((at(0x30040000))) ETH_DMADescTypeDef  DMARxDscrTab[ETH_RX_DESC_CNT]; /* Ethernet Rx DMA Descriptors */
+__attribute__((at(0x30040060))) ETH_DMADescTypeDef  DMATxDscrTab[ETH_TX_DESC_CNT]; /* Ethernet Tx DMA Descriptors */
+__attribute__((at(0x30040200))) uint8_t Rx_Buff[ETH_RX_DESC_CNT][ETH_MAX_PACKET_SIZE]; /* Ethernet Receive Buffer */
+
+#elif defined ( __GNUC__ ) /* GNU Compiler */
+
+ETH_DMADescTypeDef DMARxDscrTab[ETH_RX_DESC_CNT] __attribute__((section(".RxDecripSection"))); /* Ethernet Rx DMA Descriptors */
+ETH_DMADescTypeDef DMATxDscrTab[ETH_TX_DESC_CNT] __attribute__((section(".TxDecripSection")));   /* Ethernet Tx DMA Descriptors */
+uint8_t Rx_Buff[ETH_RX_DESC_CNT][ETH_MAX_PACKET_SIZE] __attribute__((section(".RxArraySection"))); /* Ethernet Receive Buffers */
+
+#endif
+
+ETH_TxPacketConfig TxConfig;
+
+ETH_HandleTypeDef heth;
+
+UART_HandleTypeDef huart3;
+
+/* USER CODE BEGIN PV */
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_ETH_Init(void);
+static void MX_USART3_UART_Init(void);
+void MX_USB_HOST_Process(void);
+
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+#include <arm_math.h>
+#include <stdio.h>
+#define ARM_MATH_CM7
+#define __FPU_PRESENT 1
+
+int file_ready = 0;
+extern uint8_t rtext[4096];
+extern uint8_t name[10];
+float * out_img;
+
+float MAX(float a, float b){
+	if(a>b)
+		return a;
+	else
+		return b;
+}
+
+void padding(float input[],int input_height, int input_width){
+	 int input_size = input_height * input_width;
+	 float input_1[input_size];
+	 for (int i = 0; i < input_size; i++) {
+		 input_1[i] = input[i];
+	 }
+
+	 int padwid = input_width + 2;
+	 int padheight = input_height +2;
+	 int padsize = padwid * padheight;
+
+	 for (int i = 0; i < padwid /*30*/; i++) {
+		 input[i] = 0;
+	 }
+
+	 for (int i= padwid * (input_height + 1)/*870*/; i < padsize /*900*/; i++) {
+		 input[i] = 0;
+	 }
+
+	 for (int i = padwid/*30*/; i < padwid * (input_height + 1)/*870*/; i++){
+		  if (i% padwid/*30*/ == 0 || i % padwid/*30*/ == padwid-1/*29*/) {
+		   input[i] = 0;
+		  }
+		  else {
+		   input[i] = input_1[i-(padwid+1)-((int)(i/padwid)-1)*2];
+		  }
+	 }
+	 printf("/////30*30 after padding///\n");
+	 for(int i=0;i<30;i++){
+		  for(int j=0;j<30;j++){
+			  printf("%.0f ",input[i*30+j]);
+		  }
+		  printf("\n ");
+	  }
+}
+
+void conv_1 (float input[], float kernel[], float bias[], float result[], int input_height, int input_width, int input_channel, int kernel_size, int kernel_channel )
+{
+ //conv (out_img, float kernel[] w1, float bias[] b1, float result[], 28/14, 28/14, 1/6, int kernel_size 3, int kernel_channel 4 )
+ // padding
+ //float input_1[784];
+ padding(input, input_height, input_width);
+
+
+ //convolution
+ 	 float sum;
+ 	 for(int k=0;k<input_channel;k++){
+      for (int i=0;i<28;i++){
+       for (int j=0;j<28;j++){
+        sum=0;
+        sum+=(input[(i+0)*30+j]*kernel[0*6+k])+(input[(i+0)*30+j+1]*kernel[1*6+k])+(input[(i+0)*30+j+2]*kernel[2*6+k]);
+        sum+=(input[(i+1)*30+j]*kernel[3*6+k])+(input[(i+1)*30+j+1]*kernel[4*6+k])+(input[(i+1)*30+j+2]*kernel[5*6+k]);
+        sum+=(input[(i+2)*30+j]*kernel[6*6+k])+(input[(i+2)*30+j+1]*kernel[7*6+k])+(input[(i+2)*30+j+2]*kernel[8*6+k]);
+        sum+=bias[k];
+        result[i*28*6+j*6+k]=sum;
+       }
+      }
+   }
+
+
+ //ReLU: Applied to every number after convolution
+	for (int i = 0; i < 784*6; i++){
+		result[i] = fmax(0,result[i]);
+	}
+}
+
+void conv_2 (float input[], float kernel[], float bias[], float result[], int input_height, int input_width, int input_channel, int kernel_size, int kernel_channel )
+{
+
+ padding(input, input_height, input_width);
+
+ //convolution
+ 	 float sum;
+ 	 for(int k=0;k<input_channel;k++){
+      for (int i=0;i<14;i++){
+       for (int j=0;j<14;j++){
+        sum=0;
+        sum+=(input[(i+0)*96+j]*kernel[0*6+k])+(input[(i+0)*96+j+1]*kernel[1*6+k])+(input[(i+0)*96+j+2]*kernel[2*6+k]);
+        sum+=(input[(i+1)*96+j]*kernel[3*6+k])+(input[(i+1)*96+j+1]*kernel[4*6+k])+(input[(i+1)*96+j+2]*kernel[5*6+k]);
+        sum+=(input[(i+2)*96+j]*kernel[6*6+k])+(input[(i+2)*96+j+1]*kernel[7*6+k])+(input[(i+2)*96+j+2]*kernel[8*6+k]);
+        sum+=bias[k];
+        result[i*14*6+j*6+k]=sum;
+       }
+      }
+   }
+
+
+ //ReLU: Applied to every number after convolution
+	for (int i = 0; i < 14*14*6; i++){
+		result[i] = fmax(0,result[i]);
+	}
+}
+
+void pool(float input[], float output[], int height, int width, int channel, int pool_size){
+	int a, b;
+		for (int k = 0; k < (height/pool_size)*(width/pool_size)*channel ; k=k+(height/pool_size)){
+			for (int i = 0; i < (height/pool_size); i++) {
+				a = fmax(input[2*(i+k)+2*k], input[2*(i+k)+2*k+1]); //first two elements from the first two rows
+				b = fmax(input[2*(i+k)+2*k +width], input[2*(i+k)+2*k + width +1]);
+				output[i+k] = fmax (a,b);
+
+				//output[i+k] = fmax(input[2*(i+k)+2*k], input[2*(i+k)+2*k+1], input[2*(i+k)+2*k +28], input[2*(i+k)+2*k +29] );
+			}
+		}
+
+}
+
+
+void dense(float input[], float kernel[], float bias[], double output[], int input_size, int output_size)
+//(float input[] - result after pooling, float kernel[] - fc, float bias[] - bc, double output[] , int input_size -(size after pooling) , int output_size - 10)
+{
+	float y[10];
+	for (int i = 0; i < 10; i++){
+		int sum = 0;
+		for (int j=0; j<294; j++){
+			//sum = sum + kernel[j+294*i]*input[j];
+			sum = sum + kernel[j+10*i]*input[j];
+		}
+		sum = sum + bias[i];
+		y[i] = sum;
+	}
+
+	int total = 0;
+	for (int i = 0; i < 10; i++){
+		total = total + exp(y[i]);
+	}
+
+	for (int i = 0; i < 10; i++){
+		output[i] = exp(y[i]) / total;
+	}
+
+}
+
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_ETH_Init();
+  MX_USART3_UART_Init();
+  MX_FATFS_Init();
+  MX_USB_HOST_Init();
+  /* USER CODE BEGIN 2 */
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+    MX_USB_HOST_Process();
+
+    /* USER CODE BEGIN 3 */
+    //printf("Hello\n");
+
+
+	sprintf(name,"num2_t.bmp");
+	file_ready = 0;
+	read_bmp(name);
+    if (file_ready == 1) {
+    	out_img = ProcessBmp(rtext);
+	    break;
+    }
+  }
+
+  printf("/////28*28 img /////\n");
+  for(int i=0;i<28;i++){
+	  for(int j=0;j<28;j++){
+		  printf("%.0f",out_img[i*28+j]);
+	}
+	printf("\n ");
+  }
+
+  //read in parameters
+  sprintf(name,"b1.txt");
+  float *b1=read_txt(name,6);
+
+  sprintf(name,"w1.txt");
+  float *w1=read_txt(name,54);
+
+  sprintf(name,"b2.txt");
+  float *b2=read_txt(name,6);
+
+  sprintf(name,"w2.txt");
+  float *w2=read_txt(name,324);
+
+  sprintf(name,"bc.txt");
+  float *bc=read_txt(name,10);
+
+  sprintf(name,"fc.txt");
+  float *fc=read_txt(name,2940);
+
+
+
+ 
+  /*  float *result_conv_1 = (float*) malloc(28*28*6*sizeof(float));
+    conv_1(out_img, w1,b1, result_conv_1, 28, 28, 1, 3, 6);
+
+    /*float *result_pool_1 = (float *) malloc(14*14*6*sizeof(float));
+    pool(result_conv_1, result_pool_1, 28, 28, 6, 2);
+    free(result_conv_1);
+    free(w1);
+    free(b1);
+
+
+    float *result_conv_2 = (float*) malloc(14*14*6*sizeof(float));
+    conv_2(result_pool_1, w2,b2, result_conv_2, 14, 14, 6, 3, 6);
+    free(result_pool_1);
+
+    float *result_pool_2 = (float *) malloc(7*7*6*sizeof(float));
+    pool(result_conv_2, result_pool_2, 14, 14, 6, 2);
+    free(result_conv_2);
+    free(w2);
+    free(b2);
+
+
+    double *result_dense = (double *) malloc(10*sizeof(double));
+    dense(result_pool_2, fc, bc, result_dense, 7*7*6, 10 );
+
+    for (int i=0; i<10; i++){
+    	  printf("prediction of number %d is %.15f\n", i, result_dense[i]);
+    }*/
+
+//===========================================
+
+	//layer1
+	//padding the input array
+	float out[900];
+	for (int i=0;i<30;i++){
+	for (int j=0;j<30;j++){
+		if(i==0 || j==0 || i==29 || j==29){
+			out[i*30+j]=0;
+		}
+		else{
+			out[i*30+j]=out_img[(i-1)*28+j-1];
+		}
+	}
+	}
+
+  printf("/////30*30 pixel of img after padding///\n");
+  for(int i=0;i<30;i++){
+	  for(int j=0;j<30;j++){
+		  printf("%.0f ",out[i*30+j]);
+	  }
+	  printf("\n ");
+  }
+
+
+
+	// perform NN operations
+	float *result_conv_1=(float *)malloc(28*28*6*sizeof(float));
+	  //float result_conv_1[28*28*6];
+	  float sum;
+	  //convolution
+	  for(int k=0;k<16;k++){
+	  	  for (int i=0;i<28;i++){
+	  		  for (int j=0;j<28;j++){
+	  			  sum=0;
+	  			  sum+=(out[(i+0)*30+j]*w1[0*16+k])+(out[(i+0)*30+j+1]*w1[1*16+k])+(out[(i+0)*30+j+2]*w1[2*16+k]);
+	  			  sum+=(out[(i+1)*30+j]*w1[3*16+k])+(out[(i+1)*30+j+1]*w1[4*16+k])+(out[(i+1)*30+j+2]*w1[5*16+k]);
+	  			  sum+=(out[(i+2)*30+j]*w1[6*16+k])+(out[(i+2)*30+j+1]*w1[7*16+k])+(out[(i+2)*30+j+2]*w1[8*16+k]);
+	  			  sum+=b1[k];
+	  			  result_conv_1[i*28*16+j*16+k]=sum;
+	  		  }
+	  	  }
+	  }
+	  HAL_Delay(50);
+	  //relu
+	  for(int i=0;i<28*28*16;i++){
+		  if(result_conv_1[i]<0)
+			  result_conv_1[i]=0;
+	  }
+	  for(int k=0;k<16;k++){
+	    printf("/////conv_1////////////////////////////////////////////////////////\n");
+	      for(int i=0;i<28;i++){
+	    	  for(int j=0;j<28;j++){
+	    		  printf("%.0f ",result_conv_1[i*28*16+j*16+k]);
+	    	  }
+	    	  printf("\n ");
+	    }
+	  }
+	  HAL_Delay(50);
+
+	 float *result_pool_1=(float *)malloc(14*14*16*sizeof(float));
+	   //nn_pool
+	   float a;
+	   float b;
+	   float fmax;
+	   float smax;
+	   for(int k=0;k<16;k++){
+	     	  for (int i=0;i<14;i++){
+	     		  for (int j=0;j<14;j++){
+	     			  a=result_conv_1[(2*i)*28*16+(2*j)*16+k];
+	     			  b=result_conv_1[(2*i)*28*16+(2*j+1)*16+k];
+	     			  fmax=MAX(a,b);
+	     			  a=result_conv_1[(2*i+1)*28*16+(2*j)*16+k];
+	     			  b=result_conv_1[(2*i+1)*28*16+(2*j+1)*16+k];
+	     			  smax=MAX(a,b);
+	     			  result_pool_1[i*14*16+j*16+k]=MAX(fmax,smax);
+	     		  }
+	     	  }
+	     }
+	   free(result_conv_1);
+	   free(w1);
+	   free(b1);
+	   //layer2
+//	   for(int k=0;k<6;k++){
+//	     printf("/////poo1////////////////////////////////////////////////////////\n");
+//	       for(int i=0;i<14;i++){
+//	     	  for(int j=0;j<14;j++){
+//	     		  printf("%.0f ",result_pool_1[i*84+j*6+k]);
+//	     	  }
+//	     	  printf("\n ");
+//	     }
+//	   }
+//	   HAL_Delay(50);
+
+	   float *out2=(float *)malloc(16*16*16*sizeof(float));
+
+	     //padding the 3d input
+	     for(int k=0;k<16;k++){
+	       for (int i=0;i<16;i++){
+	         for (int j=0;j<16;j++){
+	         	if(i==0 || j==0 || i==15 || j==15){
+	         		out2[i*16*16+j*16+k]=0; 
+	         	}
+	     		else{
+	     			out2[i*16*16+j*16+k]=result_pool_1[(i-1)*14*16+(j-1)*16+k]; 
+	     		}
+	        }
+	       }
+	     }
+//	     for(int k=0;k<6;k++){
+//	       printf("/////out2////////////////////////////////////////////////////////\n");
+//	         for(int i=0;i<16;i++){
+//	       	  for(int j=0;j<16;j++){
+//	       		  printf("%.0f ",out2[i*96+j*6+k]);
+//	       	  }
+//	       	  printf("\n ");
+//	       }
+//	     }
+//	     HAL_Delay(50);
+	     float *result_conv_2=(float *)malloc(14*14*32*sizeof(float));
+
+	     //convolution
+	     for(int n=0;n<32;n++){
+	       	  for (int i=0;i<14;i++){
+	       		  for (int j=0;j<14;j++){
+	       			  sum=0;
+	       			  for(int k=0;k<32;k++){
+	       			  sum+=(out2[(i+0)*16*32+j*32+k]*w2[0*32*32+k*32+n])+(out2[(i+0)*16*32+(j+1)*32+k]*w2[1*32*32+k*32+n])+(out2[(i+0)*16*32+(j+2)*32+k]*w2[2*32*32+k*32+n]);
+	       			  sum+=(out2[(i+1)*16*32+j*32+k]*w2[3*32*32+k*32+n])+(out2[(i+1)*16*32+(j+1)*32+k]*w2[4*32*32+k*32+n])+(out2[(i+1)*16*32+(j+2)*32+k]*w2[5*32*32+k*32+n]);
+	       			  sum+=(out2[(i+2)*16*32+j*32+k]*w2[6*32*32+k*32+n])+(out2[(i+2)*16*32+(j+1)*32+k]*w2[7*32*32+k*32+n])+(out2[(i+2)*16*32+(j+2)*32+k]*w2[8*32*32+k*32+n]);
+	       			  }
+	       			  sum+=b2[n];
+	       			  result_conv_2[i*14*32+j*32+n]=sum;
+	       		  }
+	       	  }
+	     }
+	       HAL_Delay(50);
+	     free(result_pool_1);
+	     //relu
+	     for(int i=0;i<14*14*32;i++){
+	     	  if(result_conv_2[i]<0)
+	     		  result_conv_2[i]=0;
+	     }
+//	     for(int k=0;k<6;k++){
+//	         printf("/////conv2////////////////////////////////////////////////////////\n");
+//	           for(int i=0;i<14;i++){
+//	         	  for(int j=0;j<14;j++){
+//	         		  printf("%.0f ",result_conv_2[i*84+j*6+k]);
+//	         	  }
+//	         	  printf("\n ");
+//	         }
+//	       }
+//	     	  HAL_Delay(50);
+	     float *result_pool_2=(float *)malloc(7*7*32*sizeof(float));
+
+	     //nn_pool
+	     for(int k=0;k<32;k++){
+	         	  for (int i=0;i<7;i++){
+	         		  for (int j=0;j<7;j++){
+	         			  a=result_conv_2[(2*i)*14*32+(2*j)*32+k];
+	         			  b=result_conv_2[(2*i)*14*32+(2*j+1)*32+k];
+	         			  fmax=MAX(a,b);
+	         			  a=result_conv_2[(2*i+1)*14*32+(2*j)*32+k];
+	         			  b=result_conv_2[(2*i+1)*14*32+(2*j+1)*32+k];
+	         			  smax=MAX(a,b);
+	         			  result_pool_2[i*7*32+j*32+k]=MAX(fmax,smax);
+	         		  }
+	         	  }
+	         }
+//	     for(int k=0;k<6;k++){
+//	           printf("/////pool2////////////////////////////////////////////////////////\n");
+//	             for(int i=0;i<7;i++){
+//	           	  for(int j=0;j<7;j++){
+//	           		  printf("%.0f ",result_pool_2[i*42+j*6+k]);
+//	           	  }
+//	           	  printf("\n ");
+//	           }
+//	     }
+//	     HAL_Delay(50);
+	     free(result_conv_2);
+	     free(w2);
+	     free(b2);
+	     double *result_dense=(double*)malloc(10*sizeof(double));
+	     //  double result_dense[10];
+	       double y[10];
+	       double sum2;
+	       //dense
+	       for(int i=0;i<10;i++){
+	     	  sum2=0;
+	     	  for(int j=0;j<1569;j++){
+	     	  	  sum2+=fc[i+j*10]*result_pool_2[j];
+	     	  }
+	     	  sum2+=bc[i];
+	     	  y[i]=sum2;
+	       }
+	       HAL_Delay(50);
+	       sum2=0;
+	       for(int i=0;i<10;i++){
+	     	  sum2+=exp(y[i]);
+	       }
+	       HAL_Delay(50);
+	       for(int i=0;i<10;i++){
+	     	  result_dense[i]=exp(y[i])/sum2;
+	       }
+	       printf("/////////////////////////////////////////////////////////////\n");
+	       for(int i=0;i<10;i++){
+	     	  printf("prediction of number %d is %.15f\n",i, result_dense[i]);
+	       }
+	       HAL_Delay(500);
+
+  while(1);
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Supply configuration update enable
+  */
+  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 1;
+  RCC_OscInitStruct.PLL.PLLN = 24;
+  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLR = 2;
+  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
+  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+  RCC_OscInitStruct.PLL.PLLFRACN = 0;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV1;
+  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief ETH Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ETH_Init(void)
+{
+
+  /* USER CODE BEGIN ETH_Init 0 */
+
+  /* USER CODE END ETH_Init 0 */
+
+   static uint8_t MACAddr[6];
+
+  /* USER CODE BEGIN ETH_Init 1 */
+
+  /* USER CODE END ETH_Init 1 */
+  heth.Instance = ETH;
+  MACAddr[0] = 0x00;
+  MACAddr[1] = 0x80;
+  MACAddr[2] = 0xE1;
+  MACAddr[3] = 0x00;
+  MACAddr[4] = 0x00;
+  MACAddr[5] = 0x00;
+  heth.Init.MACAddr = &MACAddr[0];
+  heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
+  heth.Init.TxDesc = DMATxDscrTab;
+  heth.Init.RxDesc = DMARxDscrTab;
+  heth.Init.RxBuffLen = 1524;
+
+  /* USER CODE BEGIN MACADDRESS */
+
+  /* USER CODE END MACADDRESS */
+
+  if (HAL_ETH_Init(&heth) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
+  TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
+  TxConfig.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
+  TxConfig.CRCPadCtrl = ETH_CRC_PAD_INSERT;
+  /* USER CODE BEGIN ETH_Init 2 */
+
+  /* USER CODE END ETH_Init 2 */
+
+}
+
+/**
+  * @brief USART3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART3_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART3_Init 0 */
+
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+
+  /* USER CODE END USART3_Init 1 */
+  huart3.Instance = USART3;
+  huart3.Init.BaudRate = 115200;
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;
+  huart3.Init.StopBits = UART_STOPBITS_1;
+  huart3.Init.Parity = UART_PARITY_NONE;
+  huart3.Init.Mode = UART_MODE_TX_RX;
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart3.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+  huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetTxFifoThreshold(&huart3, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_SetRxFifoThreshold(&huart3, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_UARTEx_DisableFifoMode(&huart3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART3_Init 2 */
+
+  /* USER CODE END USART3_Init 2 */
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(USB_OTG_FS_PWR_EN_GPIO_Port, USB_OTG_FS_PWR_EN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_6, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : B1_Pin */
+  GPIO_InitStruct.Pin = B1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LD1_Pin LD3_Pin */
+  GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : USB_OTG_FS_PWR_EN_Pin */
+  GPIO_InitStruct.Pin = USB_OTG_FS_PWR_EN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(USB_OTG_FS_PWR_EN_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PG6 */
+  GPIO_InitStruct.Pin = GPIO_PIN_6;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : USB_OTG_FS_OVCR_Pin */
+  GPIO_InitStruct.Pin = USB_OTG_FS_OVCR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(USB_OTG_FS_OVCR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LD2_Pin */
+  GPIO_InitStruct.Pin = LD2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+
+}
+
+/* USER CODE BEGIN 4 */
+int _write(int file, char *ptr, int len)
+{
+  /* Implement your write code here, this is used by puts and printf for example */
+  int i=0;
+  for(i=0 ; i<len ; i++)
+    ITM_SendChar((*ptr++));
+  return len;
+}
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  HAL_GPIO_WritePin(GPIOB, LD3_Pin, GPIO_PIN_SET);
+	__disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
